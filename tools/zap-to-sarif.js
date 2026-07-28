@@ -25,11 +25,15 @@ const outPath = process.argv[4] || 'zap.sarif';
 
 // ZAP riskcode -> SARIF level + GitHub security-severity(0~10)
 // GitHub 은 security-severity 로 Critical(>=9)/High(>=7)/Medium(>=4)/Low(>0) 등급을 매깁니다.
+//
+// Informational 에는 security-severity 를 붙이지 않습니다.
+// 붙이면 GitHub 이 "Low 보안 취약점"으로 승격시켜 심각도가 통째로 왜곡되고,
+// 룰셋의 심각도 임계값 게이트까지 잘못 작동합니다. (1차 실행에서 30건이 이렇게 부풀었습니다)
 const RISK = {
   3: { level: 'error', score: '7.5', label: 'High' },
   2: { level: 'warning', score: '5.5', label: 'Medium' },
   1: { level: 'note', score: '3.0', label: 'Low' },
-  0: { level: 'note', score: '1.0', label: 'Informational' },
+  0: { level: 'note', score: null, label: 'Informational' },
 };
 
 function stripHtml(s) {
@@ -123,13 +127,17 @@ for (const site of sites) {
             .join('\n')
             .slice(0, 4000),
         },
-        properties: {
-          tags: ['security', 'DAST', 'OWASP-ZAP'].concat(cwe ? [`external/cwe/cwe-${cwe}`] : []),
-          'security-severity': risk.score,
-          precision: 'medium',
-          zapRisk: risk.label,
-          zapPluginId: String(alert.pluginid),
-        },
+        properties: Object.assign(
+          {
+            tags: ['DAST', 'OWASP-ZAP']
+              .concat(risk.score ? ['security'] : [])
+              .concat(cwe ? [`external/cwe/cwe-${cwe}`] : []),
+            precision: 'medium',
+            zapRisk: risk.label,
+            zapPluginId: String(alert.pluginid),
+          },
+          risk.score ? { 'security-severity': risk.score } : {}
+        ),
       });
     }
 
