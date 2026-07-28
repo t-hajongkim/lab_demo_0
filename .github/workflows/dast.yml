@@ -1,9 +1,9 @@
 name: DAST
 
 on:
+  push:
+    branches: [lab-dast]
   workflow_dispatch:
-  pull_request:
-    branches: [main]
 
 jobs:
   scan:
