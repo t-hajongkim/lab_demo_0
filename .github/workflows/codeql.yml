@@ -12,6 +12,9 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
+    env:
+      # PR 에서도 diff 범위가 아닌 전체 코드를 분석해 기준선과 직접 비교 가능하게 합니다.
+      CODEQL_ACTION_DIFF_INFORMED_QUERIES: false
     permissions:
       security-events: write
       packages: read
