@@ -36,14 +36,18 @@ const RISK = {
   0: { level: 'note', score: null, label: 'Informational' },
 };
 
+// CodeQL 이 js/double-escaping 으로 지적한 지점입니다 (실제 버그였습니다).
+// &amp; 를 먼저 풀면 "&amp;quot;" 가 "&quot;" 를 거쳐 '"' 로 이중 언이스케이프됩니다.
+// 원문에 있던 리터럴 "&quot;" 가 따옴표로 둔갑하므로 &amp; 는 반드시 마지막에 풉니다.
 function stripHtml(s) {
   return String(s || '')
     .replace(/<\/(p|br|li)>/gi, '\n')
     .replace(/<[^>]*>/g, ' ')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&')
     .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, '&')
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .trim();
