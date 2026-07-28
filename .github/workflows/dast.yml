@@ -1,0 +1,73 @@
+name: DAST
+
+on:
+  workflow_dispatch:
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: rootpw
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -prootpw"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps
+        run: npm ci || npm install
+
+      - name: Seed database
+        run: |
+          command -v mysql >/dev/null || sudo apt-get update && sudo apt-get install -y mysql-client
+          mysql -h 127.0.0.1 -P 3306 -uroot -prootpw < schema.sql
+
+      - name: Start app
+        env:
+          PORT: 3000
+          API_KEY: lab-test-key-for-dast
+          DB_HOST: 127.0.0.1
+          DB_PORT: 3306
+          DB_USER: root
+          DB_PASSWORD: rootpw
+          DB_NAME: asset_mgmt
+        run: |
+          npm start > app.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:3000/health > /dev/null; then
+              echo "app is up"; exit 0
+            fi
+            sleep 2
+          done
+          echo "app failed to start"; cat app.log; exit 1
+
+      - name: Verify endpoints
+        env:
+          API_KEY: lab-test-key-for-dast
+        run: |
+          echo "--- health ---"
+          curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/health
+          echo "--- no api key (expect 401) ---"
+          curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/api/accounts/110-234-567890/balance
+          echo "--- with api key (expect 200) ---"
+          curl -s -H "x-api-key: $API_KEY" http://127.0.0.1:3000/api/accounts/110-234-567890/balance
+
+      - name: Dump app log
+        if: always()
+        run: cat app.log || true
