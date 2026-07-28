@@ -5,12 +5,14 @@ on:
     branches: [lab-dast]
   workflow_dispatch:
 
+permissions:
+  contents: read
+  security-events: write
+
 jobs:
   scan:
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write
+    timeout-minutes: 25
 
     services:
       mysql:
@@ -25,10 +27,14 @@ jobs:
           --health-timeout=5s
           --health-retries=10
 
-    steps:
-      - uses: actions/checkout@v4
+    env:
+      API_KEY: lab-test-key-for-dast
+      BASE_URL: http://127.0.0.1:3000
 
-      - uses: actions/setup-node@v4
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
         with:
           node-version: 20
 
@@ -37,13 +43,15 @@ jobs:
 
       - name: Seed database
         run: |
-          command -v mysql >/dev/null || sudo apt-get update && sudo apt-get install -y mysql-client
+          if ! command -v mysql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y mysql-client
+          fi
           mysql -h 127.0.0.1 -P 3306 -uroot -prootpw < schema.sql
 
       - name: Start app
         env:
           PORT: 3000
-          API_KEY: lab-test-key-for-dast
           DB_HOST: 127.0.0.1
           DB_PORT: 3306
           DB_USER: root
@@ -52,7 +60,7 @@ jobs:
         run: |
           npm start > app.log 2>&1 &
           for i in $(seq 1 30); do
-            if curl -sf http://127.0.0.1:3000/health > /dev/null; then
+            if curl -sf "$BASE_URL/health" > /dev/null; then
               echo "app is up"; exit 0
             fi
             sleep 2
@@ -60,16 +68,112 @@ jobs:
           echo "app failed to start"; cat app.log; exit 1
 
       - name: Verify endpoints
-        env:
-          API_KEY: lab-test-key-for-dast
         run: |
           echo "--- health ---"
-          curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/health
+          curl -s -o /dev/null -w "%{http_code}\n" "$BASE_URL/health"
           echo "--- no api key (expect 401) ---"
-          curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:3000/api/accounts/110-234-567890/balance
+          curl -s -o /dev/null -w "%{http_code}\n" "$BASE_URL/api/accounts/110-234-567890/balance"
           echo "--- with api key (expect 200) ---"
-          curl -s -H "x-api-key: $API_KEY" http://127.0.0.1:3000/api/accounts/110-234-567890/balance
+          curl -s -H "x-api-key: $API_KEY" "$BASE_URL/api/accounts/110-234-567890/balance"
+
+      # ── 동적 분석 ──────────────────────────────────────────────
+      # ZAP 은 컨테이너로 돌지만 액션이 docker run --network="host" 를 쓰므로
+      # 러너의 127.0.0.1:3000 에 그대로 접근합니다.
+      # ZAP_AUTH_HEADER_* 가 없으면 스캐너는 전 요청 401 만 받고 아무것도 못 찾습니다.
+      - name: OWASP ZAP API scan
+        uses: zaproxy/action-api-scan@v0.10.0
+        with:
+          target: 'openapi.yaml'
+          format: openapi
+          allow_issue_writing: false
+          fail_action: false
+          artifact_name: zap-dast-report
+          cmd_options: '-a -I'
+        env:
+          ZAP_AUTH_HEADER: x-api-key
+          ZAP_AUTH_HEADER_VALUE: lab-test-key-for-dast
+          ZAP_AUTH_HEADER_SITE: 127.0.0.1
+
+      - name: Convert ZAP report to SARIF
+        id: sarif
+        if: always()
+        run: |
+          if [ ! -f report_json.json ]; then
+            echo "::error::ZAP JSON 리포트(report_json.json)가 없습니다."
+            ls -la
+            exit 1
+          fi
+          node tools/zap-to-sarif.js report_json.json openapi.yaml zap.sarif
+
+      - name: Upload SARIF to code scanning
+        if: always() && hashFiles('zap.sarif') != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: zap.sarif
+          category: zap-dast
+
+      # ── 스캐너가 원리적으로 못 잡는 영역 ─────────────────────────
+      # 인가 누락(IDOR)은 "이 계좌가 이 사용자 것인가"라는 업무 규칙입니다.
+      # CodeQL 도 ZAP 도 그 규칙을 모르므로 사람이 명시적으로 단언해야 합니다.
+      - name: 인가 누락 명시 테스트
+        if: always()
+        run: |
+          A=$(curl -s -o /dev/null -w "%{http_code}" -H "x-api-key: $API_KEY" \
+                "$BASE_URL/api/accounts/110-234-567890/balance")
+          B=$(curl -s -o /dev/null -w "%{http_code}" -H "x-api-key: $API_KEY" \
+                "$BASE_URL/api/accounts/110-234-567891/balance")
+          echo "고객1 김하준 계좌 110-234-567890 -> $A"
+          echo "고객2 이서연 계좌 110-234-567891 -> $B"
+          if [ "$A" = "200" ] && [ "$B" = "200" ]; then
+            echo "::error title=인가 누락(IDOR)::API 키 하나로 서로 다른 고객 2명의 계좌 잔고가 모두 조회됩니다. 인증은 있으나 인가가 없습니다."
+            echo "AUTHZ_BROKEN=true" >> "$GITHUB_ENV"
+          else
+            echo "AUTHZ_BROKEN=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: 결과 요약
+        if: always()
+        run: |
+          {
+            echo "## DAST 실측 결과"
+            echo ""
+            echo "### OWASP ZAP (동적)"
+            echo ""
+            echo "| 심각도 | 건수 |"
+            echo "|---|---|"
+            echo "| High | ${{ steps.sarif.outputs.high || 'n/a' }} |"
+            echo "| Medium | ${{ steps.sarif.outputs.medium || 'n/a' }} |"
+            echo "| Low | ${{ steps.sarif.outputs.low || 'n/a' }} |"
+            echo "| Informational | ${{ steps.sarif.outputs.info || 'n/a' }} |"
+            echo ""
+            echo "규칙 ${{ steps.sarif.outputs.rules || 'n/a' }}개 / 결과 ${{ steps.sarif.outputs.results || 'n/a' }}건"
+            echo ""
+            echo "### 계층별 탐지 여부"
+            echo ""
+            echo "| 취약점 | CodeQL(정적) | ZAP(동적) | 명시 테스트 |"
+            echo "|---|---|---|---|"
+            echo "| Rate limiting 부재 | O (2건) | X | - |"
+            echo "| 보안 헤더 / 전송구간 | X | 위 표 참조 | - |"
+            echo "| **인가 누락 (IDOR)** | **X** | **X** | **${AUTHZ_BROKEN}** |"
+            echo ""
+            if [ "${AUTHZ_BROKEN}" = "true" ]; then
+              echo "> 인가 누락이 재현됐습니다. 정적분석 103개 룰(security-extended)도, 동적분석 ZAP 도 잡지 못한 항목입니다."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Dump app log
         if: always()
         run: cat app.log || true
+
+      - name: Upload scan artifacts
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dast-evidence
+          path: |
+            report_json.json
+            report_html.html
+            report_md.md
+            zap.sarif
+            app.log
+          if-no-files-found: warn

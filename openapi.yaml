@@ -1,0 +1,69 @@
+openapi: 3.0.3
+info:
+  title: Asset Management Balance Lookup API
+  description: >-
+    자산운용 계좌 잔고 조회 API.
+    DAST 스캐너에게 공격 표면을 알려주는 지도 역할을 합니다.
+    이 파일이 없으면 ZAP 은 어떤 URL 을 때려야 하는지 알 수 없습니다.
+  version: 0.1.0
+
+servers:
+  - url: http://127.0.0.1:3000
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: x-api-key
+
+paths:
+  /health:
+    get:
+      summary: 헬스 체크
+      responses:
+        '200':
+          description: 정상
+        '503':
+          description: DB 연결 불가
+
+  /api/accounts/{accountNumber}/balance:
+    get:
+      summary: 계좌 잔고 조회
+      security:
+        - ApiKeyAuth: []
+      parameters:
+        - name: accountNumber
+          in: path
+          required: true
+          description: 계좌번호 (숫자와 하이픈, 10~30자)
+          schema:
+            type: string
+            example: '110-234-567890'
+      responses:
+        '200':
+          description: 조회 성공
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  accountNumber:
+                    type: string
+                  customerName:
+                    type: string
+                  currency:
+                    type: string
+                  balance:
+                    type: string
+                  status:
+                    type: string
+                  asOf:
+                    type: string
+                    format: date-time
+        '400':
+          description: 계좌번호 형식 오류
+        '401':
+          description: API 키 없음 또는 불일치
+        '404':
+          description: 계좌 없음
